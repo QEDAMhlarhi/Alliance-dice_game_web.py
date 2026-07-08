@@ -9,10 +9,16 @@ MIN_BET = 20
 HOUSE_CUT = 0.1  # House keeps 10% of winnings
 WIN_MULTIPLIER = 1 - HOUSE_CUT  # Player receives 90%
 
-# Initialize Supabase client
-supabase_url = st.secrets["SUPABASE_URL"]
-supabase_key = st.secrets["SUPABASE_KEY"]
-supabase_client: Client = create_client(supabase_url, supabase_key)
+# Initialize Supabase client with error handling
+try:
+    supabase_url = st.secrets["SUPABASE_URL"]
+    supabase_key = st.secrets["SUPABASE_KEY"]
+    supabase_client: Client = create_client(supabase_url, supabase_key)
+    SUPABASE_CONNECTED = True
+except Exception as e:
+    SUPABASE_CONNECTED = False
+    supabase_client = None
+    st.warning("⚠️ Supabase not connected. Leaderboard features disabled.")
 
 
 def reset_session_state():
@@ -28,6 +34,10 @@ def reset_session_state():
 
 
 def add_to_leaderboard(name, starting_balance, final_balance):
+    if not SUPABASE_CONNECTED:
+        st.error("❌ Leaderboard unavailable - Supabase not configured")
+        return
+    
     net_gain = final_balance - starting_balance
     try:
         supabase_client.table("leaderboard").insert({
@@ -42,6 +52,9 @@ def add_to_leaderboard(name, starting_balance, final_balance):
         st.error(f"Failed to submit: {e}")
 
 def load_leaderboard():
+    if not SUPABASE_CONNECTED:
+        return []
+    
     try:
         response = supabase_client.table("leaderboard").select("*").order("net_gain", desc=True).limit(10).execute()
         return response.data if response.data else []
@@ -53,7 +66,7 @@ def load_leaderboard():
 def process_roll(total, bet, in_point_phase, point):
     """
     Process a craps roll. Returns (round_ended, balance_delta, message_type, message).
-    message_type: "win" | "lose" | "continue" | None
+    message_type: "win" | "lose" | "continue" | "point" | None
     """
     if not in_point_phase:
         if total in (7, 11):
@@ -61,6 +74,7 @@ def process_roll(total, bet, in_point_phase, point):
             return True, win_amount, "win", "🎉 Natural! You WIN!"
         if total in (2, 3, 12):
             return True, -bet, "lose", f"☠️ Craps! You rolled {total} — You LOSE!"
+        # Point is set
         return False, 0, "point", f"📌 Point is set to **{total}**. Roll again to match it!"
     else:
         if total == point:
@@ -68,7 +82,8 @@ def process_roll(total, bet, in_point_phase, point):
             return True, win_amount, "win", "🎯 You matched the point! You WIN!"
         if total == 7:
             return True, -bet, "lose", "☠️ You rolled a 7 before the point! You LOSE!"
-        return False, 0, "continue", "🔁 Keep rolling..."
+        # Continue rolling
+        return False, 0, "continue", f"🔁 Rolled {total}. Keep rolling to hit {point} or avoid 7..."
 
 
 def render_leaderboard(entries, title="🏆 Alliance Hall of Fame & Shame", compact=False):
@@ -229,16 +244,16 @@ def show_rules():
 🎲 **Alliance Dice Game — Craps Rules (SA Edition)**
 
 📌 **Come-Out Roll (First Roll):**
-- Roll **7 or 11** → “Natural” → **You WIN!** 🎉 (House keeps 10%)
-- Roll **2, 3, or 12** → “Craps” → **You LOSE!** ☠️
-- Roll **4, 5, 6, 8, 9, or 10** → That’s your **POINT**
+- Roll **7 or 11** → "Natural" → **You WIN!** 🎉 (House keeps 10%)
+- Roll **2, 3, or 12** → "Craps" → **You LOSE!** ☠️
+- Roll **4, 5, 6, 8, 9, or 10** → That's your **POINT**
 
 📌 **Point Phase:**
 - Roll your **POINT** again → **You WIN!** 🎯 (House keeps 10%)
 - Roll a **7** → **You LOSE!** ☠️
 - Any other number → Roll again! 🔁
 
-💰 **Betting:**
+ **Betting:**
 - Minimum bet: R20
 - Win = + 90% of your bet | Lose = - 100% of your bet
 - 🏦 The house always keeps 10% of winnings — fair but firm!
@@ -307,7 +322,6 @@ else:
                     st.session_state.starting_balance,
                     st.session_state.balance
                 )
-                st.success("✅ Score submitted to Hall of (Mostly) Losses!")
                 st.rerun()
         with col2:
             if st.button("📊 View Leaderboard", key="view_lb"):
@@ -332,6 +346,7 @@ else:
             st.info(f"🔒 Bet locked in: **R{st.session_state.current_bet}**")
 
         dice_placeholder = st.empty()
+        message_placeholder = st.empty()  # NEW: Dedicated placeholder for messages
 
         if st.button("🎲 Roll the Dice!", key="roll_button"):
             if not st.session_state.round_active:
@@ -350,22 +365,27 @@ else:
                     st.session_state.in_point_phase, st.session_state.point
                 )
                 st.session_state.balance += balance_delta
-                if round_ended:
+                
+                # Display message properly
+                if msg_type == "point":
+                    st.session_state.point = total
+                    st.session_state.in_point_phase = True
+                    message_placeholder.info(msg)
+                elif msg_type == "continue":
+                    message_placeholder.warning(msg)
+                elif msg_type == "win":
                     st.session_state.round_active = False
                     st.session_state.in_point_phase = False
                     st.session_state.point = None
-                    if msg_type == "win":
-                        st.success(msg)
-                        play_sound_from_url(WIN_SOUND_URL)
-                        st.info("🏦 House keeps 10% of winnings. You received 90%.")
-                    else:
-                        st.error(msg)
-                        play_sound_from_url(LOSE_SOUND_URL)
-                else:
-                    if msg_type == "point":
-                        st.session_state.point = total
-                        st.session_state.in_point_phase = True
-                    st.info(msg) if msg_type == "point" else st.warning(msg)
+                    message_placeholder.success(msg)
+                    play_sound_from_url(WIN_SOUND_URL)
+                    st.info("🏦 House keeps 10% of winnings. You received 90%.")
+                elif msg_type == "lose":
+                    st.session_state.round_active = False
+                    st.session_state.in_point_phase = False
+                    st.session_state.point = None
+                    message_placeholder.error(msg)
+                    play_sound_from_url(LOSE_SOUND_URL)
 
         # Auto Roll
         col_auto1, col_auto2 = st.columns(2)
@@ -400,17 +420,26 @@ else:
                 d2_final = random.randint(1, 6)
                 total = animate_dice_roll(dice_placeholder, d1_final, d2_final, steps=6, play_sound=False)
 
-                round_ended, balance_delta, msg_type, _ = process_roll(
+                round_ended, balance_delta, msg_type, msg = process_roll(
                     total, bet, st.session_state.in_point_phase, st.session_state.point
                 )
                 st.session_state.balance += balance_delta
+                
+                # Handle messages in auto roll
+                if msg_type == "point":
+                    st.session_state.point = total
+                    st.session_state.in_point_phase = True
+                elif msg_type == "continue":
+                    pass  # Keep rolling
+                elif msg_type in ("win", "lose"):
+                    st.session_state.round_active = False
+                    st.session_state.in_point_phase = False
+                    st.session_state.point = None
+                
                 if round_ended:
                     st.session_state.round_active = False
                     st.session_state.in_point_phase = False
                     st.session_state.point = None
-                else:
-                    st.session_state.point = total if msg_type == "point" else st.session_state.point
-                    st.session_state.in_point_phase = True
 
                 time.sleep(AUTO_ROLL_DELAY)
                 st.rerun()
